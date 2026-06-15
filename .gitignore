@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.venv/
+venv/
+.env
+*.log
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform/.terraform.lock.hcl
+*.pem
+*.key
+*.cert
+.DS_Store
+Thumbs.db
