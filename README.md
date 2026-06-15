@@ -33,7 +33,8 @@ Requires `JWT_SECRET` to be set — services fail at startup with a clear error 
 ### Option 1: Web UI Dashboard (easiest — no Docker needed)
 
 ```bash
-pip install fastapi uvicorn httpx pydantic pydantic-settings PyJWT
+pip install fastapi uvicorn httpx pydantic pydantic-settings PyJWT prometheus-client
+set JWT_SECRET=your-long-random-secret
 cd ZT-Agentic-gateway
 python ui/server.py
 ```
@@ -50,6 +51,7 @@ make demo-all
 ### Option 3: CLI (without Docker)
 
 ```bash
+set JWT_SECRET=your-long-random-secret
 python test_integration.py
 ```
 
