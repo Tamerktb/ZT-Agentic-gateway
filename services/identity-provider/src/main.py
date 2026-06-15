@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 import jwt
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO)
@@ -19,6 +20,14 @@ JWT_ALGORITHM = "HS256"
 JWT_TTL_MINUTES = 60
 
 app = FastAPI(title="Identity Provider", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 registered_agents: dict[str, dict] = {}
 
