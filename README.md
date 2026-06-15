@@ -56,14 +56,32 @@ The architecture is modular and each service can be replaced or extended:
 
 ## Quick Start
 
+### Option 1: Web UI Dashboard (easiest — no Docker needed)
+
 ```bash
-# With Docker:
+pip install fastapi uvicorn httpx pydantic pydantic-settings PyJWT
+cd ZT-Agentic-gateway
+python ui/server.py
+```
+
+Opens a browser at **http://127.0.0.1:8080** with a visual dashboard. Click "Run All Tests" to see the project working.
+
+### Option 2: CLI (with Docker)
+
+```bash
 make build && make up
 make demo-all
+```
 
-# Without Docker:
+### Option 3: CLI (without Docker)
+
+```bash
 python test_integration.py
+```
 
+### View results manually
+
+```bash
 # View audit chain:
 curl http://localhost:8004/api/v1/audit/chain | python -m json.tool
 
@@ -131,6 +149,9 @@ If any stage fails, the action is blocked immediately and logged.
 │   ├── audit-service/             # Hash-chain audit log
 │   ├── demo-agents/               # Example agent flows
 │   └── attack-simulator/          # Attack demonstrations
+├── ui/                              # Web UI dashboard
+│   ├── server.py                   # Starts services + serves UI
+│   └── index.html                  # Visual dashboard
 ├── terraform/                      # AWS IaC deployment
 ├── monitoring/                     # Wazuh SIEM rules
 └── images/                         # Architecture diagram
