@@ -10,7 +10,7 @@ services:
       - CREDENTIAL_VAULT_URL=http://credential-vault:8002
       - POLICY_ENGINE_URL=http://policy-engine:8003
       - AUDIT_SERVICE_URL=http://audit-service:8004
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     depends_on:
       identity-provider:
         condition: service_healthy
@@ -30,7 +30,11 @@ services:
       - "8001:8001"
     environment:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required. Copy .env.example to .env and set it.}
-      - LOG_LEVEL=INFO
+      - JWT_TTL_MINUTES=${JWT_TTL_MINUTES:-60}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - IDP_DATA_DIR=/app/data
+    volumes:
+      - idp-data:/app/data
     networks:
       - zt-network
     restart: unless-stopped
@@ -45,7 +49,11 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - CREDENTIAL_TTL=${CREDENTIAL_TTL:-120}
+      - VAULT_DATA_DIR=/app/data
+    volumes:
+      - vault-data:/app/data
     networks:
       - zt-network
     restart: unless-stopped
@@ -60,7 +68,7 @@ services:
     ports:
       - "8003:8003"
     environment:
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     networks:
       - zt-network
     restart: unless-stopped
@@ -75,7 +83,8 @@ services:
     ports:
       - "8004:8004"
     environment:
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AUDIT_DATA_DIR=/app/data
     volumes:
       - audit-data:/app/data
     networks:
@@ -87,35 +96,11 @@ services:
       timeout: 3s
       retries: 5
 
-  demo-agents:
-    build: ./services/demo-agents
-    environment:
-      - GATEWAY_URL=http://ai-gateway:8000
-    depends_on:
-      ai-gateway:
-        condition: service_started
-    networks:
-      - zt-network
-    profiles:
-      - demo
-    restart: "no"
-
-  attack-simulator:
-    build: ./services/attack-simulator
-    environment:
-      - GATEWAY_URL=http://ai-gateway:8000
-    depends_on:
-      ai-gateway:
-        condition: service_started
-    networks:
-      - zt-network
-    profiles:
-      - demo
-    restart: "no"
-
 networks:
   zt-network:
     driver: bridge
 
 volumes:
+  idp-data:
+  vault-data:
   audit-data:

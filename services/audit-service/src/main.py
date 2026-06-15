@@ -2,12 +2,17 @@
 Audit Service — maintains an immutable hash-chain log of all agent actions.
 Each entry contains a SHA256 hash of the previous entry (blockchain-style).
 Provides chain verification endpoint to detect any tampering with logs.
+
+Uses SQLite for persistence — data survives restarts. Compatible with standard SQL tools.
 """
-import json
+import sqlite3
 import hashlib
 import logging
+import os
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import closing
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,34 +30,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATA_DIR = Path("/app/data")
+DATA_DIR = Path(os.environ.get("AUDIT_DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-CHAIN_FILE = DATA_DIR / "audit_chain.json"
-
-audit_chain: list[dict] = []
+DB_PATH = str(DATA_DIR / "audit.db")
 
 
-def _load_chain():
-    global audit_chain
-    if CHAIN_FILE.exists():
-        with open(CHAIN_FILE) as f:
-            audit_chain = json.load(f)
-        logger.info(f"Loaded audit chain: {len(audit_chain)} entries")
-    else:
-        genesis = {
-            "index": 0,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event": "chain_initialized",
-            "prev_hash": "0" * 64,
-            "hash": hashlib.sha256(b"genesis_block_zero_trust").hexdigest(),
-        }
-        audit_chain.append(genesis)
-        _persist_chain()
-        logger.info("Initialized genesis block in audit chain")
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
 
 
-def _persist_chain():
-    CHAIN_FILE.write_text(json.dumps(audit_chain, indent=2))
+def init_db():
+    with closing(get_db()) as db:
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS audit_chain (
+                idx INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                target TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL UNIQUE
+            )
+        """)
+        db.execute("CREATE INDEX IF NOT EXISTS idx_agent ON audit_chain(agent_id)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_decision ON audit_chain(decision)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_ts ON audit_chain(timestamp)")
+
+        row = db.execute("SELECT COUNT(*) as cnt FROM audit_chain").fetchone()
+        if row["cnt"] == 0:
+            genesis_hash = hashlib.sha256(b"genesis_block_zero_trust").hexdigest()
+            db.execute(
+                "INSERT INTO audit_chain (idx, trace_id, agent_id, action_type, target, input_hash, decision, timestamp, prev_hash, hash) "
+                "VALUES (0, 'genesis', 'system', 'init', 'chain', '', 'initialized', ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(), "0" * 64, genesis_hash),
+            )
+            db.commit()
+            logger.info("Initialized genesis block in audit chain")
+
+        db.commit()
 
 
 class LogEntry(BaseModel):
@@ -74,97 +96,97 @@ class ChainVerifyResult(BaseModel):
 
 @app.post("/api/v1/audit/log")
 async def log_entry(entry: LogEntry):
-    prev_entry = audit_chain[-1]
-    prev_hash = prev_entry["hash"]
+    with closing(get_db()) as db:
+        prev = db.execute("SELECT hash FROM audit_chain ORDER BY idx DESC LIMIT 1").fetchone()
+        prev_hash = prev["hash"]
 
-    raw = f"{entry.timestamp}|{entry.agent_id}|{entry.action_type}|{entry.target}|{entry.decision}|{prev_hash}"
-    current_hash = hashlib.sha256(raw.encode()).hexdigest()
+        raw = f"{entry.timestamp}|{entry.agent_id}|{entry.action_type}|{entry.target}|{entry.decision}|{prev_hash}"
+        current_hash = hashlib.sha256(raw.encode()).hexdigest()
 
-    chain_entry = {
-        "index": len(audit_chain),
-        "trace_id": entry.trace_id,
-        "agent_id": entry.agent_id,
-        "action_type": entry.action_type,
-        "target": entry.target,
-        "input_hash": entry.input_hash,
-        "decision": entry.decision,
-        "timestamp": entry.timestamp,
-        "prev_hash": prev_hash,
-        "hash": current_hash,
-    }
+        decisions_json = json.dumps([d if isinstance(d, dict) else d.model_dump() for d in entry.decisions])
 
-    audit_chain.append(chain_entry)
-    _persist_chain()
+        db.execute(
+            "INSERT INTO audit_chain (trace_id, agent_id, action_type, target, input_hash, decision, timestamp, prev_hash, hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (entry.trace_id, entry.agent_id, entry.action_type, entry.target,
+             entry.input_hash, entry.decision, entry.timestamp, prev_hash, current_hash),
+        )
+        db.commit()
+        idx = db.execute("SELECT idx FROM audit_chain WHERE hash = ?", (current_hash,)).fetchone()["idx"]
 
     log_decision = (
         f"ALLOWED: {entry.agent_id} -> {entry.action_type} on {entry.target}"
         if entry.decision == "ALLOWED"
         else f"DENIED ({entry.decision}): {entry.agent_id} -> {entry.action_type} on {entry.target}"
     )
-    logger.info(f"Audit logged [{chain_entry['index']}]: {log_decision}")
-
-    return {"index": chain_entry["index"], "hash": current_hash, "status": "logged"}
+    logger.info(f"Audit logged [{idx}]: {log_decision}")
+    return {"index": idx, "hash": current_hash, "status": "logged"}
 
 
 @app.get("/api/v1/audit/chain")
 async def get_chain(limit: int = 50, offset: int = 0):
-    entries = audit_chain[offset:offset + limit]
-    return {
-        "total": len(audit_chain),
-        "offset": offset,
-        "limit": limit,
-        "entries": entries,
-    }
+    with closing(get_db()) as db:
+        total = db.execute("SELECT COUNT(*) as cnt FROM audit_chain").fetchone()["cnt"]
+        rows = db.execute(
+            "SELECT * FROM audit_chain ORDER BY idx ASC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+        entries = [dict(r) for r in rows]
+    return {"total": total, "offset": offset, "limit": limit, "entries": entries}
 
 
 @app.get("/api/v1/audit/chain/verify")
 async def verify_chain():
-    for i in range(1, len(audit_chain)):
-        current = audit_chain[i]
-        prev = audit_chain[i - 1]
+    with closing(get_db()) as db:
+        rows = db.execute("SELECT * FROM audit_chain ORDER BY idx ASC").fetchall()
 
-        expected_prev_hash = prev["hash"]
-        if current["prev_hash"] != expected_prev_hash:
-            return ChainVerifyResult(
-                valid=False,
-                entries_checked=i,
-                first_invalid_index=i,
-            )
+    for i in range(1, len(rows)):
+        current = dict(rows[i])
+        prev = dict(rows[i - 1])
 
-        raw = f"{current['timestamp']}|{current['agent_id']}|{current['action_type']}|{current['target']}|{current['decision']}|{expected_prev_hash}"
+        if current["prev_hash"] != prev["hash"]:
+            return ChainVerifyResult(valid=False, entries_checked=i, first_invalid_index=i)
+
+        raw = f"{current['timestamp']}|{current['agent_id']}|{current['action_type']}|{current['target']}|{current['decision']}|{prev['hash']}"
         expected_hash = hashlib.sha256(raw.encode()).hexdigest()
         if current["hash"] != expected_hash:
-            return ChainVerifyResult(
-                valid=False,
-                entries_checked=i,
-                first_invalid_index=i,
-            )
+            return ChainVerifyResult(valid=False, entries_checked=i, first_invalid_index=i)
 
-    return ChainVerifyResult(valid=True, entries_checked=len(audit_chain))
+    return ChainVerifyResult(valid=True, entries_checked=len(rows))
 
 
 @app.get("/api/v1/audit/agent/{agent_id}")
 async def get_agent_audit(agent_id: str):
-    entries = [e for e in audit_chain if e.get("agent_id") == agent_id]
-    return {"agent_id": agent_id, "total_actions": len(entries), "entries": entries[-50:]}
+    with closing(get_db()) as db:
+        total = db.execute("SELECT COUNT(*) as cnt FROM audit_chain WHERE agent_id = ?", (agent_id,)).fetchone()["cnt"]
+        rows = db.execute(
+            "SELECT * FROM audit_chain WHERE agent_id = ? ORDER BY idx DESC LIMIT 50",
+            (agent_id,),
+        ).fetchall()
+        entries = [dict(r) for r in rows]
+    return {"agent_id": agent_id, "total_actions": total, "entries": entries}
 
 
 @app.get("/api/v1/audit/stats")
 async def get_stats():
-    total = len(audit_chain) - 1
-    allowed = sum(1 for e in audit_chain if e.get("decision") == "ALLOWED")
-    denied = sum(1 for e in audit_chain if e.get("decision", "").startswith("DENIED"))
+    with closing(get_db()) as db:
+        total = db.execute("SELECT COUNT(*) as cnt FROM audit_chain").fetchone()["cnt"] - 1
+        allowed = db.execute("SELECT COUNT(*) as cnt FROM audit_chain WHERE decision = 'ALLOWED'").fetchone()["cnt"]
+        denied = db.execute("SELECT COUNT(*) as cnt FROM audit_chain WHERE decision LIKE 'DENIED%'").fetchone()["cnt"]
+        verify = await verify_chain()
     return {
         "total_actions": total,
         "allowed": allowed,
         "denied": denied,
-        "chain_integrity": "verified" if (await verify_chain()).valid else "COMPROMISED",
+        "chain_integrity": "verified" if verify.valid else "COMPROMISED",
     }
 
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "audit-service", "chain_length": len(audit_chain)}
+    with closing(get_db()) as db:
+        length = db.execute("SELECT COUNT(*) as cnt FROM audit_chain").fetchone()["cnt"]
+    return {"status": "healthy", "service": "audit-service", "chain_length": length}
 
 
 @app.get("/")
@@ -172,4 +194,4 @@ async def root():
     return {"service": "Audit Service", "version": "1.0.0", "status": "running"}
 
 
-_load_chain()
+init_db()
